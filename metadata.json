@@ -1,0 +1,6 @@
+{
+  "name": "Multimedia Fraud Detection System",
+  "description": "An advanced AI-powered forensic dashboard to analyze image and video authenticity, exposing synthetic or deepfake manipulations with state-of-the-art models like Effort and WaveRep.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
