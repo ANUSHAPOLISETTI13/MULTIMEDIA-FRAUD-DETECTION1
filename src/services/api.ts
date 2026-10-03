@@ -5,30 +5,32 @@
 
 export interface DetectionResult {
   prediction: 'REAL' | 'FAKE';
-  score: number; // Confidence score, e.g. 0.87 (from 0.0 to 1.0)
-  total_frames?: number; // For video (WaveRep model)
-  synthetic_frames?: number; // For video (WaveRep model)
-  nonsynthetic_frames?: number; // For video (WaveRep model)
-  model_name: string; // "Effort" (Image) or "WaveRep" (Video)
-  analysis_time: number; // Duration of analysis in seconds
+  score: number;
+  total_frames?: number;
+  synthetic_frames?: number;
+  nonsynthetic_frames?: number;
+  model_name: string;
+  analysis_time: number;
   status: 'SUCCESS' | 'ERROR';
   error_message?: string;
 }
 
-// Read API URL from Vite environment variable.
-// Configurable at build/runtime. Defaults to blank which will trigger safe fallback or relative path.
-const API_URL = import.meta.env.VITE_API_URL || '';
+// Temporary Cloudflare Quick Tunnel URL for the working Colab backend.
+// IMPORTANT: This URL changes when the Colab tunnel is restarted.
+const API_URL =
+  import.meta.env.VITE_API_URL ||
+  'https://horse-boc-amendment-kijiji.trycloudflare.com';
 
-/**
- * Checks if the backend API is configured and accessible.
- * If it is unconfigured, we can offer a seamless mock/simulation mode.
- */
 export async function checkBackendHealth(): Promise<boolean> {
-  if (!API_URL) return false;
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
-    const response = await fetch(`${API_URL}/health`, { signal: controller.signal });
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+    // The current FastAPI backend exposes GET / rather than GET /health.
+    const response = await fetch(API_URL + '/', {
+      signal: controller.signal,
+    });
+
     clearTimeout(timeoutId);
     return response.ok;
   } catch {
@@ -36,76 +38,91 @@ export async function checkBackendHealth(): Promise<boolean> {
   }
 }
 
-/**
- * Sends a media file to the Python backend for deepfake / synthetic media detection.
- * 
- * Target Models:
- * - Images: Effort Model (Orthogonal Subspace Decomposition)
- * - Videos: WaveRep Model (Synthetic Video Detection)
- * 
- * @param file The image or video file to be analyzed.
- * @param type 'image' | 'video'
- * @param forceSandbox Set to true to bypass backend and run client-side simulation.
- */
 export async function analyzeMedia(
   file: File,
   type: 'image' | 'video',
   forceSandbox: boolean = false
 ): Promise<DetectionResult> {
-  if (forceSandbox || !API_URL) {
-    // Return a high-quality simulation matching the expected backend response structure
+  // The current real backend is available for video through WaveRep.
+  // Do not silently simulate a result when Backend API Mode is selected.
+  if (forceSandbox) {
     return await simulateAnalysis(file, type);
+  }
+
+  if (type !== 'video') {
+    throw new Error(
+      'The live Python backend currently exposes WaveRep video detection only.'
+    );
   }
 
   const formData = new FormData();
   formData.append('file', file);
-  formData.append('media_type', type);
+
+  const startTime = performance.now();
 
   try {
-    const response = await fetch(`${API_URL}/analyze`, {
+    const response = await fetch(API_URL + '/predict/video', {
       method: 'POST',
       body: formData,
     });
 
-    if (!response.ok) {
-      throw new Error(`Server responded with status ${response.status}`);
+    const data = await response.json();
+
+    if (!response.ok || data.success === false) {
+      throw new Error(
+        data.error || `Server responded with status ${response.status}`
+      );
     }
 
-    const data = await response.json();
+    const syntheticProbability = Number(data.synthetic_probability);
+
     return {
-      prediction: data.prediction,
-      score: Number(data.score),
-      total_frames: data.total_frames !== undefined ? Number(data.total_frames) : undefined,
-      synthetic_frames: data.synthetic_frames !== undefined ? Number(data.synthetic_frames) : undefined,
-      nonsynthetic_frames: data.nonsynthetic_frames !== undefined ? Number(data.nonsynthetic_frames) : undefined,
-      model_name: type === 'image' ? 'Effort' : 'WaveRep',
-      analysis_time: data.analysis_time !== undefined ? Number(data.analysis_time) : 1.24,
-      status: 'SUCCESS'
+      // WaveRep uses SYNTHETIC/REAL. The existing UI uses FAKE/REAL,
+      // so SYNTHETIC is mapped to FAKE for the existing presentation.
+      prediction: data.prediction === 'SYNTHETIC' ? 'FAKE' : 'REAL',
+      score: syntheticProbability,
+      total_frames:
+        data.frames_processed !== undefined
+          ? Number(data.frames_processed)
+          : undefined,
+      model_name: 'WaveRep',
+      analysis_time: Number(
+        ((performance.now() - startTime) / 1000).toFixed(2)
+      ),
+      status: 'SUCCESS',
     };
   } catch (error: any) {
-    console.error('Backend connection failed:', error);
-    // Propagate authentic system error structure so the UI can decide to fall back or show an error
-    throw new Error(error.message || 'Detection service is currently unavailable.');
+    console.error('WaveRep backend connection failed:', error);
+    throw new Error(
+      error.message || 'Detection service is currently unavailable.'
+    );
   }
 }
 
 /**
- * High-fidelity client-side simulation.
- * This ensures the student, professors, and evaluators can view the full interactive capability
- * of the application out-of-the-box, even without starting the Python backend.
+ * Client-side demo mode.
+ * This is retained only for the existing Sandbox Mode in the UI.
+ * It is NOT used when Backend API Mode is selected.
  */
-function simulateAnalysis(file: File, type: 'image' | 'video'): Promise<DetectionResult> {
+function simulateAnalysis(
+  file: File,
+  type: 'image' | 'video'
+): Promise<DetectionResult> {
   return new Promise((resolve) => {
-    const analysisDuration = type === 'image' ? 1500 : 3200; // Simulated computation lag
-    
+    const analysisDuration = type === 'image' ? 1500 : 3200;
+
     setTimeout(() => {
-      // Deterministic but realistic prediction based on file name or length to make tests look real
       const nameLower = file.name.toLowerCase();
-      const isFake = nameLower.includes('fake') || nameLower.includes('synthetic') || nameLower.includes('generated') || nameLower.includes('ai') || Math.random() > 0.45;
-      
-      const score = isFake 
-        ? 0.85 + Math.random() * 0.13 // High fake confidence
-        : 0.82 + Math.random() * 0.16; // High real confidence
+      const isFake =
+        nameLower.includes('fake') ||
+        nameLower.includes('synthetic') ||
+        nameLower.includes('generated') ||
+        nameLower.includes('ai') ||
+        Math.random() > 0.45;
+
+      const score = isFake
+        ? 0.85 + Math.random() * 0.13
+        : 0.82 + Math.random() * 0.16;
 
       if (type === 'image') {
         resolve({
@@ -113,22 +130,16 @@ function simulateAnalysis(file: File, type: 'image' | 'video'): Promise<Detectio
           score: Number(score.toFixed(3)),
           model_name: 'Effort',
           analysis_time: Number((1.1 + Math.random() * 0.6).toFixed(2)),
-          status: 'SUCCESS'
+          status: 'SUCCESS',
         });
       } else {
-        // Video specific statistics
-        const total_frames = Math.floor(180 + Math.random() * 320); // 180-500 frames
+        const total_frames = Math.floor(180 + Math.random() * 320);
         let synthetic_frames = 0;
         let nonsynthetic_frames = total_frames;
 
         if (isFake) {
-          // Deepfakes might modify a portion of frames or all frames
-          const ratio = 0.35 + Math.random() * 0.6; // 35% to 95% fake frames
+          const ratio = 0.35 + Math.random() * 0.6;
           synthetic_frames = Math.floor(total_frames * ratio);
-          nonsynthetic_frames = total_frames - synthetic_frames;
-        } else {
-          // Clean video has 0 or extremely low false-positive synthetic frames
-          synthetic_frames = Math.random() > 0.8 ? Math.floor(Math.random() * 3) : 0;
           nonsynthetic_frames = total_frames - synthetic_frames;
         }
 
@@ -140,7 +151,7 @@ function simulateAnalysis(file: File, type: 'image' | 'video'): Promise<Detectio
           nonsynthetic_frames,
           model_name: 'WaveRep',
           analysis_time: Number((2.8 + Math.random() * 1.5).toFixed(2)),
-          status: 'SUCCESS'
+          status: 'SUCCESS',
         });
       }
     }, analysisDuration);
